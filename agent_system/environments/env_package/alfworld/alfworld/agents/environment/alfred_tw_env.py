@@ -114,10 +114,11 @@ class AlfredTWEnv(object):
     Interface for Textworld Env
     '''
 
-    def __init__(self, config, train_eval="train"):
+    def __init__(self, config, train_eval="train", problem=None):
         print("Initializing AlfredTWEnv...")
         self.config = config
         self.train_eval = train_eval
+        self.problem = problem
 
         if config["env"]["goal_desc_human_anns_prob"] > 0:
             msg = ("Warning! Changing `goal_desc_human_anns_prob` should be done with"
@@ -149,6 +150,44 @@ class AlfredTWEnv(object):
         for tt_id in self.config['env']['task_types']:
             if tt_id in TASK_TYPES:
                 task_types.append(TASK_TYPES[tt_id])
+
+        # designate the only problem
+        if self.problem is not None:
+            print("We have a designated problem to load: %s" % problem)
+            root = "/checkpoint/ai_society/jtsu/alfworld/" + problem
+
+            # Filenames
+            json_path = os.path.join(root, 'traj_data.json')
+            game_file_path = os.path.join(root, "game.tw-pddl")
+
+            # if 'movable' in root or 'Sliced' in root:
+            #     log("Movable & slice trajs not supported %s" % (root))
+
+            # Get goal description
+            with open(json_path, 'r') as f:
+                traj_data = json.load(f)
+
+            with open(game_file_path, 'r') as f:
+                gamedata = json.load(f)
+
+            # Add to game file list
+            self.game_files.append(game_file_path)
+
+            print(f"Overall we have {len(self.game_files)} games in split={self.train_eval}")
+            self.num_games = len(self.game_files)
+
+            if self.train_eval == "train":
+                num_train_games = self.config['dataset']['num_train_games'] if self.config['dataset']['num_train_games'] > 0 else len(self.game_files)
+                self.game_files = self.game_files[:num_train_games]
+                self.num_games = len(self.game_files)
+                print("Training with %d games" % (len(self.game_files)))
+            else:
+                num_eval_games = self.config['dataset']['num_eval_games'] if self.config['dataset']['num_eval_games'] > 0 else len(self.game_files)
+                self.game_files = self.game_files[:num_eval_games]
+                self.num_games = len(self.game_files)
+                print("Evaluating with %d games" % (len(self.game_files)))
+
+            return
 
         count = 0
         for root, dirs, files in tqdm(list(os.walk(data_path, topdown=False))):

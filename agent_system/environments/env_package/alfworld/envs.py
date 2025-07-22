@@ -52,7 +52,7 @@ def compute_reward(info, multi_modal=False):
         reward = 10.0 * float(info['won'])
     return reward
 
-@ray.remote(num_cpus=0.2)
+@ray.remote(num_cpus=0.25)
 class AlfworldWorker:
     """
     Ray remote actor that replaces the worker function.
@@ -94,7 +94,7 @@ class AlfworldEnvs(gym.Env):
         eval_dataset = env_kwargs.get('eval_dataset', 'eval_in_distribution')
         config = load_config_file(alf_config_path)
         env_type = config['env']['type']
-        base_env = get_environment(env_type)(config, train_eval='train' if is_train else eval_dataset)
+        base_env = get_environment(env_type)(config, train_eval='train' if is_train else eval_dataset, problem=env_kwargs.get('problem', None))
         self.multi_modal = (env_type == 'AlfredThorEnv')
         self.num_processes = env_num * group_n
         self.group_n = group_n
