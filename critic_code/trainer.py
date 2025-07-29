@@ -42,6 +42,7 @@ class QTrainer():
         pg_multiplier = 10.0,
         awr_beta = 0.05,
         detach_model = False,
+        reweighting: float = None,
     ):
         """
         beta: coefficient for the bc loss
@@ -51,7 +52,8 @@ class QTrainer():
         self.target_critic = target_critic
         self.tokenizer = tokenizer
         # self.lm_optimizer = torch.optim.Adam(agent.model.parameters(), lr = lm_lr)
-        self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr = critic_lr)
+        # self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr = critic_lr)
+        self.critic_optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, self.critic.parameters()), lr = critic_lr)
         self.task_set = task_set
         self.advantage_estimation = advantage_estimation
         self.detach_model = detach_model
@@ -72,6 +74,7 @@ class QTrainer():
         self.accelerator = accelerator
         self.num_action_resampling = num_action_resampling
         self.device = self.accelerator.unwrap_model(self.critic).device
+        self.reweighting = reweighting
 
     def prepare(self):
         self.lm_optimizer = self.accelerator.prepare(self.lm_optimizer)
@@ -84,9 +87,9 @@ class QTrainer():
         # both mc and bellman should obtain Q and V from the dataset (not from the model)
         q1, q2, v1, v2 = self.critic(batch, detach_model=self.detach_model)
         with torch.no_grad():
-            q1_target, q2_target, _, _ = self.target_critic(batch, detach_model=self.detach_model)
+            q1_target, q2_target, _, _ = self.target_critic(batch)
             # action is dummy in the line below
-            _, _, v1_target, v2_target = self.target_critic(batch, detach_model=self.detach_model, next_state=True)
+            _, _, v1_target, v2_target = self.target_critic(batch, next_state=True)
         q1, q2, v1, v2, q1_target, q2_target, v1_target, v2_target = q1.flatten(), q2.flatten(), v1.flatten(), v2.flatten(), q1_target.flatten(), q2_target.flatten(), v1_target.flatten(), v2_target.flatten()
         v1_target = reward + (1 - done)*v1_target*self.gamma
         v2_target = reward + (1 - done)*v2_target*self.gamma
@@ -96,12 +99,18 @@ class QTrainer():
         # v1_loss = self.criterion(v1, q1_target)
         # v2_loss = self.criterion(v2, q2_target)
 
-        weights = done * 99 + 1 # 100 for done, 1 for not done
+        if self.reweighting is not None:
+            weights = done * self.reweighting + 1 # default self.reweighting = 99, implies 100 for done, 1 for not done
 
-        q1_loss = (self.criterion(q1, v1_target) * weights).mean()
-        q2_loss = (self.criterion(q2, v2_target) * weights).mean()
-        v1_loss = (self.criterion(v1, q1_target) * weights).mean()
-        v2_loss = (self.criterion(v2, q2_target) * weights).mean()
+            q1_loss = (self.criterion(q1, v1_target) * weights).mean()
+            q2_loss = (self.criterion(q2, v2_target) * weights).mean()
+            v1_loss = (self.criterion(v1, q1_target) * weights).mean()
+            v2_loss = (self.criterion(v2, q2_target) * weights).mean()
+        else:
+            q1_loss = self.criterion(q1, v1_target).mean()
+            q2_loss = self.criterion(q2, v2_target).mean()
+            v1_loss = self.criterion(v1, q1_target).mean()
+            v2_loss = self.criterion(v2, q2_target).mean()
 
         if not validation:
             self.accelerator.backward(v1_loss+v2_loss+q1_loss+q2_loss)

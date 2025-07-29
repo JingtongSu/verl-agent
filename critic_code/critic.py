@@ -71,6 +71,15 @@ class VLMDoubleCritic(torch.nn.Module):
         # v_states = state if not next_state else self.lm(**next_state_inputs, output_hidden_states=True).hidden_states[-1][:, -1, :]
 
         # Tokenize states, actions, and next_states on the fly
+
+        if next_state:
+            next_state_inputs = self.tokenizer(
+                batch['s_prime'], return_tensors="pt", padding=True, truncation=True, max_length=1280
+            ).to(self.device)
+            v_states = self.lm(**next_state_inputs, output_hidden_states=True).hidden_states[-1][:, -1, :]
+
+            return None, None, self.v_critic1(v_states), self.v_critic2(v_states)
+
         state_inputs = self.tokenizer(
             batch['s'], return_tensors="pt", padding=True, truncation=True, max_length=1280
         ).to(self.device)
@@ -91,13 +100,13 @@ class VLMDoubleCritic(torch.nn.Module):
 
         # print("q_states shape:", q_states.shape)
         
-        if next_state:
-            next_state_inputs = self.tokenizer(
-                batch['s_prime'], return_tensors="pt", padding=True, truncation=True, max_length=1280
-            ).to(self.device)
-            v_states = self.lm(**next_state_inputs, output_hidden_states=True).hidden_states[-1][:, -1, :]
-        else:
-            v_states = state
+        # if next_state:
+        #     next_state_inputs = self.tokenizer(
+        #         batch['s_prime'], return_tensors="pt", padding=True, truncation=True, max_length=1280
+        #     ).to(self.device)
+        #     v_states = self.lm(**next_state_inputs, output_hidden_states=True).hidden_states[-1][:, -1, :]
+        # else:
+        v_states = state
 
         # print("v_states shape:", v_states.shape)
 

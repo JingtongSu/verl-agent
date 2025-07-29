@@ -5,7 +5,7 @@ from datetime import timedelta
 from data_utils import SupervisedDataset
 from trainer import QTrainer
 from accelerate import DistributedDataParallelKwargs, InitProcessGroupKwargs
-from utils import colorful_print
+# from utils import colorful_print
 import argparse
 import copy
 import torch
@@ -54,6 +54,8 @@ parser.add_argument('--use_wandb', action='store_true', help='Use Weights & Bias
 parser.add_argument('--wandb_project', type=str, default='qv-critic', help='Wandb project name.')
 parser.add_argument('--wandb_run_name', type=str, default='attempt', help='Wandb run name.')
 parser.add_argument('--store_model_name', type=str, default='qv_critic', help='Model name to store.')
+parser.add_argument('--reweighting', type=float, default=None, help='Reweighting factor for the loss.')
+parser.add_argument('--freeze', type=bool, default=None, help='Whether to freeze the model parameters.')
 
 args = parser.parse_args()
 
@@ -70,6 +72,15 @@ model = VLMDoubleCritic(
     in_dim=1536, # Example dimension, adjust if necessary
     out_dim=1    # Example dimension, adjust if necessary
 ).to(device)
+
+# freeze the model parameters except for the critic layers if specified
+if args.freeze:
+    print("Freezing model parameters except for critic layers.")
+    for name, param in model.named_parameters():
+        if 'q_critic' in name or 'v_critic' in name:
+            param.requires_grad = True
+        else:
+            param.requires_grad = False
 
 tokenizer = transformers.AutoTokenizer.from_pretrained(args.critic_lm)
 tokenizer.truncation_side = 'left'
@@ -104,7 +115,8 @@ trainer = QTrainer(
     target_critic = copy.deepcopy(model).to(device),
     accelerator=accelerator,
     tokenizer=tokenizer,
-    detach_model=True
+    detach_model=True,
+    reweighting=args.reweighting
 )
 
 print("Trainer Initialized.")
@@ -112,7 +124,7 @@ print("Trainer Initialized.")
 os.makedirs(args.save_path, exist_ok=True)
 
 if os.path.exists(os.path.join(args.save_path, f'{args.store_model_name}.pt')):
-    print("Loading from offline critic (no training)")
+    print("Loading from offline critic.")
     trainer.load(os.path.join(args.save_path, f'{args.store_model_name}.pt'))
 
 print(">>>Training critic")
