@@ -14,6 +14,8 @@ critic_code/__pycache__/
 critic_code/textfiles/
 critic_code/wandb/
 results/
+slurm_logs/
+textfiles/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
