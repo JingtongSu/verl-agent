@@ -153,8 +153,8 @@ class AlfredTWEnv(object):
 
         # designate the only problem
         if self.problem is not None:
-            print("We have a designated problem to load: %s" % problem)
-            root = "/checkpoint/ai_society/jtsu/alfworld/" + problem
+            print("We have a designated problem to load: %s" % self.problem)
+            root = "/checkpoint/ai_society/jtsu/alfworld/" + self.problem
 
             # Filenames
             json_path = os.path.join(root, 'traj_data.json')
@@ -166,6 +166,10 @@ class AlfredTWEnv(object):
             # Get goal description
             with open(json_path, 'r') as f:
                 traj_data = json.load(f)
+
+            # Check if a game file exists
+            # if not os.path.exists(game_file_path):
+            #     print(f"Skipping missing game! {game_file_path}")
 
             with open(game_file_path, 'r') as f:
                 gamedata = json.load(f)

@@ -9,6 +9,12 @@
 **/playground
 **/wandb
 
+# Our stuff
+critic_code/__pycache__/
+critic_code/textfiles/
+critic_code/wandb/
+results/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
