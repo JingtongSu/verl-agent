@@ -76,9 +76,12 @@ class QTrainer():
         self.device = self.accelerator.unwrap_model(self.critic).device
         self.reweighting = reweighting
 
-    def prepare(self):
-        self.lm_optimizer = self.accelerator.prepare(self.lm_optimizer)
-        self.critic_optimizer = self.accelerator.prepare(self.critic_optimizer)
+    def prepare(self, dataloader):
+        # self.lm_optimizer = self.accelerator.prepare(self.lm_optimizer)
+        # self.critic_optimizer = self.accelerator.prepare(self.critic_optimizer)
+        self.critic, self.target_critic, self.critic_optimizer, self.dataloader = self.accelerator.prepare(
+            self.critic, self.target_critic, self.critic_optimizer, dataloader
+        )
 
     def critic_loss(self, batch, validation=False, **kwargs):
         reward = torch.Tensor(batch['r']).to(self.device)
@@ -254,8 +257,8 @@ class QTrainer():
         
         # for epoch in tqdm(range(self.epochs), disable= not self.accelerator.is_main_process):
         info_list = []
-        for batch_idx, batch in enumerate(dataloader):
-            print(f"Batch {batch_idx+1}/{len(dataloader)}")
+        for batch_idx, batch in enumerate(self.dataloader):
+            print(f"Batch {batch_idx+1}/{len(self.dataloader)}")
             with self.accelerator.accumulate(self.critic):
                 self.critic_optimizer.zero_grad()
                 batch_info = self.critic_loss(batch)

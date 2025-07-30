@@ -62,7 +62,16 @@ args = parser.parse_args()
 if args.use_wandb:
     wandb.init(project=args.wandb_project, name=args.wandb_run_name, config=args)
 
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
+# device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+# ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+ddp_kwargs = DistributedDataParallelKwargs()
+initp_kwargs = InitProcessGroupKwargs(timeout=timedelta(seconds=60*60))
+accelerator = Accelerator(kwargs_handlers=[ddp_kwargs, initp_kwargs], 
+                            project_dir = args.save_path,
+                            gradient_accumulation_steps=args.grad_accum_steps)
+
+device = accelerator.device
 
 # model = transformers.AutoModel.from_pretrained(args.critic_lm, cache_dir=args.cache_dir).to(device)
 model = VLMDoubleCritic(
@@ -71,7 +80,7 @@ model = VLMDoubleCritic(
     cache_dir=args.cache_dir,
     in_dim=1536, # Example dimension, adjust if necessary
     out_dim=1    # Example dimension, adjust if necessary
-).to(device)
+)# .to(device)
 
 # freeze the model parameters except for the critic layers if specified
 if args.freeze:
@@ -103,32 +112,39 @@ dataloader = torch.utils.data.DataLoader(
 
 print("Dataloader Ready.")
 
-ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
-initp_kwargs = InitProcessGroupKwargs(timeout=timedelta(seconds=60*60))
-accelerator = Accelerator(kwargs_handlers=[ddp_kwargs, initp_kwargs], 
-                            project_dir = args.save_path,
-                            gradient_accumulation_steps=args.grad_accum_steps)
+target_critic = copy.deepcopy(model)
 
 trainer = QTrainer(
     critic=model,
     # make a copy of the critic model weights for target critic
-    target_critic = copy.deepcopy(model).to(device),
+    target_critic = target_critic,
     accelerator=accelerator,
     tokenizer=tokenizer,
     detach_model=True,
     reweighting=args.reweighting
 )
 
+trainer.prepare(dataloader)
+
 print("Trainer Initialized.")
 
 os.makedirs(args.save_path, exist_ok=True)
 
 if os.path.exists(os.path.join(args.save_path, f'{args.store_model_name}.pt')):
-    print("Loading from offline critic.")
-    trainer.load(os.path.join(args.save_path, f'{args.store_model_name}.pt'))
+    print("The final model already exists. No training will be performed.")
+    exit(0)
+
+current_epoch = 0
+
+for i in reversed(range(1, args.epochs + 1)):
+    if os.path.exists(os.path.join(args.save_path, f'{args.store_model_name}_epoch_{i}.pt')):
+        print(f"Loading model from epoch {i}...")
+        current_epoch = i
+        trainer.load(os.path.join(args.save_path, f'{args.store_model_name}_epoch_{i}.pt'))
+        break
 
 print(">>>Training critic")
-for i in range(args.epochs):
+for i in range(current_epoch, args.epochs):
     info = trainer.update_critic(dataloader)
     if args.use_wandb and accelerator.is_main_process:
         # Add a prefix to distinguish epoch-level average stats
