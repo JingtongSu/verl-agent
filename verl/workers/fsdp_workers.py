@@ -69,6 +69,7 @@ from peft import PeftModel
 from safetensors.torch import save_file
 from dataclasses import asdict
 import json
+# from critic_code.critic import VLMDoubleCritic
 
 
 logger = logging.getLogger(__file__)
@@ -1188,13 +1189,21 @@ class RewardModelWorker(Worker):
 
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            model_config.classifier_dropout = 0.0
-            reward_module = AutoModelForTokenClassification.from_pretrained(
-                pretrained_model_name_or_path=local_path,
-                config=model_config,
-                torch_dtype=torch.bfloat16,
-                attn_implementation="flash_attention_2",
-                trust_remote_code=trust_remote_code,
+            # model_config.classifier_dropout = 0.0
+            # reward_module = AutoModelForTokenClassification.from_pretrained(
+            #     pretrained_model_name_or_path=local_path,
+            #     config=model_config,
+            #     torch_dtype=torch.bfloat16,
+            #     attn_implementation="flash_attention_2",
+            #     trust_remote_code=trust_remote_code,
+            # )
+            # Instantiate the VLMDoubleCritic model
+            reward_module = VLMDoubleCritic(
+                device=get_torch_device().current_device(),
+                critic_lm=local_path,
+                cache_dir=None,  # copy_to_local handles this
+                in_dim=0, # Not used in __init__
+                out_dim=0 # Not used in __init__
             )
 
             apply_monkey_patch(
@@ -1253,41 +1262,47 @@ class RewardModelWorker(Worker):
         from verl.utils.ulysses import gather_outpus_and_unpad, ulysses_pad_and_slice_inputs
 
         with torch.no_grad(), torch.autocast(device_type=device_name, dtype=torch.bfloat16):
-            input_ids = micro_batch["input_ids"]
-            batch_size, seqlen = input_ids.shape
-            attention_mask = micro_batch["attention_mask"]
-            position_ids = micro_batch["position_ids"]
+        #     input_ids = micro_batch["input_ids"]
+        #     batch_size, seqlen = input_ids.shape
+        #     attention_mask = micro_batch["attention_mask"]
+        #     position_ids = micro_batch["position_ids"]
 
-            if self.use_remove_padding:
-                input_ids_rmpad, indices, *_ = unpad_input(input_ids.unsqueeze(-1), attention_mask)  # input_ids_rmpad (total_nnz, ...)
-                input_ids_rmpad = input_ids_rmpad.transpose(0, 1)  # (1, total_nnz)
+        #     if self.use_remove_padding:
+        #         input_ids_rmpad, indices, *_ = unpad_input(input_ids.unsqueeze(-1), attention_mask)  # input_ids_rmpad (total_nnz, ...)
+        #         input_ids_rmpad = input_ids_rmpad.transpose(0, 1)  # (1, total_nnz)
 
-                # unpad the position_ids to align the rotary
-                position_ids_rmpad = index_first_axis(rearrange(position_ids.unsqueeze(-1), "b s ... -> (b s) ..."), indices).transpose(0, 1)
+        #         # unpad the position_ids to align the rotary
+        #         position_ids_rmpad = index_first_axis(rearrange(position_ids.unsqueeze(-1), "b s ... -> (b s) ..."), indices).transpose(0, 1)
 
-                # pad and slice the inputs if sp > 1
-                if self.ulysses_sequence_parallel_size > 1:
-                    input_ids_rmpad, position_ids_rmpad, pad_size = ulysses_pad_and_slice_inputs(input_ids_rmpad, position_ids_rmpad, sp_size=self.ulysses_sequence_parallel_size)
+        #         # pad and slice the inputs if sp > 1
+        #         if self.ulysses_sequence_parallel_size > 1:
+        #             input_ids_rmpad, position_ids_rmpad, pad_size = ulysses_pad_and_slice_inputs(input_ids_rmpad, position_ids_rmpad, sp_size=self.ulysses_sequence_parallel_size)
 
-                # only pass input_ids and position_ids to enable flash_attn_varlen
-                output = self.reward_module(input_ids=input_ids_rmpad, attention_mask=None, position_ids=position_ids_rmpad, use_cache=False)  # prevent model thinks we are generating
-                reward_rmpad = output.logits
-                reward_rmpad = reward_rmpad.squeeze(0)  # (total_nnz)
+        #         # only pass input_ids and position_ids to enable flash_attn_varlen
+        #         output = self.reward_module(input_ids=input_ids_rmpad, attention_mask=None, position_ids=position_ids_rmpad, use_cache=False)  # prevent model thinks we are generating
+        #         reward_rmpad = output.logits
+        #         reward_rmpad = reward_rmpad.squeeze(0)  # (total_nnz)
 
-                # gather output if sp > 1
-                if self.ulysses_sequence_parallel_size > 1:
-                    reward_rmpad = gather_outpus_and_unpad(reward_rmpad, gather_dim=0, unpad_dim=0, padding_size=pad_size)
+        #         # gather output if sp > 1
+        #         if self.ulysses_sequence_parallel_size > 1:
+        #             reward_rmpad = gather_outpus_and_unpad(reward_rmpad, gather_dim=0, unpad_dim=0, padding_size=pad_size)
 
-                # pad it back
-                rm_score = pad_input(reward_rmpad, indices=indices, batch=batch_size, seqlen=seqlen).squeeze(-1)
-            else:
-                output = self.reward_module(input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids, use_cache=False)
-                rm_score = output.logits  # (batch_size, seq_len, 1)
-                rm_score = rm_score.squeeze(-1)
+        #         # pad it back
+        #         rm_score = pad_input(reward_rmpad, indices=indices, batch=batch_size, seqlen=seqlen).squeeze(-1)
+        #     else:
+        #         output = self.reward_module(input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids, use_cache=False)
+        #         rm_score = output.logits  # (batch_size, seq_len, 1)
+        #         rm_score = rm_score.squeeze(-1)
 
-            # extract the result of the last valid token
-            eos_mask_idx = torch.argmax(position_ids * attention_mask, dim=-1)  # (bsz,)
-            rm_score = rm_score[torch.arange(batch_size), eos_mask_idx]
+        #     # extract the result of the last valid token
+        #     eos_mask_idx = torch.argmax(position_ids * attention_mask, dim=-1)  # (bsz,)
+        #     rm_score = rm_score[torch.arange(batch_size), eos_mask_idx]
+        #     return rm_score
+
+            # The micro_batch should contain 's' and 'a' for the critic
+            q1, q2, _, _ = self.reward_module(micro_batch)
+            # Using the first q-value as the score. You can also use torch.min(q1, q2)
+            rm_score = q1.squeeze(-1)
             return rm_score
 
     def _expand_to_token_level(self, data: DataProto, scores: torch.Tensor):
@@ -1305,6 +1320,28 @@ class RewardModelWorker(Worker):
 
         return token_level_scores
 
+    # assign scores to all response tokens
+    def _expand_to_token_level_for_responses(self, data: DataProto, scores: torch.Tensor):
+        batch_size = data.batch.batch_size[0]
+        # expand as token_level_reward
+        attention_mask = data.batch["attention_mask"]
+        position_ids = data.batch["position_ids"]
+        response_length = data.batch["responses"].shape[-1]
+
+        response_attention_mask = attention_mask[:, -response_length:]
+
+        # Reshape scores from (batch_size,) to (batch_size, 1) to enable broadcasting
+        # across the sequence length dimension.
+        scores_expanded = scores.unsqueeze(1)
+
+        token_level_scores = scores_expanded * response_attention_mask.to(scores.dtype)
+
+        # select the response part
+        token_level_scores = token_level_scores[:, -response_length:]
+
+        return token_level_scores
+
+    # build our reward model through this given function
     def _switch_chat_template(self, data: DataProto):
         src_max_length = data.batch["attention_mask"].shape[-1]
 
@@ -1332,39 +1369,54 @@ class RewardModelWorker(Worker):
             # remove bos and eos
             response = response.replace(src_tokenizer.eos_token, "")
 
-            chat.append({"role": "assistant", "content": response})
+        #     chat.append({"role": "assistant", "content": response})
 
-            prompt_with_chat_template = target_tokenizer.apply_chat_template(chat, add_generation_prompt=False, tokenize=False)
+        #     prompt_with_chat_template = target_tokenizer.apply_chat_template(chat, add_generation_prompt=False, tokenize=False)
+        #     if self.rank == 0 and i == 0:
+        #         # for debugging purpose
+        #         print(f"Switch template. chat: {prompt_with_chat_template}")
+
+        #     # the maximum length is actually determined by the reward model itself
+        #     max_length = self.config.get("max_length", src_max_length)
+        #     if max_length is None:
+        #         max_length = src_max_length
+
+        #     model_inputs = target_tokenizer(prompt_with_chat_template, return_tensors="pt", add_special_tokens=False)
+        #     input_ids, attention_mask = verl_F.postprocess_data(
+        #         input_ids=model_inputs["input_ids"],
+        #         attention_mask=model_inputs["attention_mask"],
+        #         max_length=max_length,
+        #         pad_token_id=target_tokenizer.pad_token_id,
+        #         left_pad=False,  # right padding
+        #         truncation=self.config.get("truncation", "right"),
+        #     )  # truncate from the right
+
+        #     rm_input_ids.append(input_ids)
+        #     rm_attention_mask.append(attention_mask)
+
+        # rm_input_ids = torch.cat(rm_input_ids, dim=0)
+        # rm_attention_mask = torch.cat(rm_attention_mask, dim=0)
+
+        # rm_position_ids = compute_position_id_with_mask(rm_attention_mask)
+
+        # rm_inputs = {"input_ids": rm_input_ids, "attention_mask": rm_attention_mask, "position_ids": rm_position_ids}
+
+        # return DataProto.from_dict(rm_inputs)
+
+            # The state is the conversation history
+            state_prompt = target_tokenizer.apply_chat_template(chat, add_generation_prompt=False, tokenize=False)
+            states.append(state_prompt)
+
+            # The action is the generated response
+            actions.append(response)
+
             if self.rank == 0 and i == 0:
                 # for debugging purpose
-                print(f"Switch template. chat: {prompt_with_chat_template}")
+                print(f"State: {state_prompt}")
+                print(f"Action: {response}")
 
-            # the maximum length is actually determined by the reward model itself
-            max_length = self.config.get("max_length", src_max_length)
-            if max_length is None:
-                max_length = src_max_length
-
-            model_inputs = target_tokenizer(prompt_with_chat_template, return_tensors="pt", add_special_tokens=False)
-            input_ids, attention_mask = verl_F.postprocess_data(
-                input_ids=model_inputs["input_ids"],
-                attention_mask=model_inputs["attention_mask"],
-                max_length=max_length,
-                pad_token_id=target_tokenizer.pad_token_id,
-                left_pad=False,  # right padding
-                truncation=self.config.get("truncation", "right"),
-            )  # truncate from the right
-
-            rm_input_ids.append(input_ids)
-            rm_attention_mask.append(attention_mask)
-
-        rm_input_ids = torch.cat(rm_input_ids, dim=0)
-        rm_attention_mask = torch.cat(rm_attention_mask, dim=0)
-
-        rm_position_ids = compute_position_id_with_mask(rm_attention_mask)
-
-        rm_inputs = {"input_ids": rm_input_ids, "attention_mask": rm_attention_mask, "position_ids": rm_position_ids}
-
-        return DataProto.from_dict(rm_inputs)
+        # Return a dictionary that can be passed to the critic's forward method
+        return {"s": states, "a": actions}
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_rm_score(self, data: DataProto):
@@ -1375,7 +1427,11 @@ class RewardModelWorker(Worker):
         # Support all hardwares
         data = data.to(get_torch_device().current_device())
         if self._do_switch_chat_template:
-            rm_data = self._switch_chat_template(data)
+            # rm_data = self._switch_chat_template(data)
+            # _switch_chat_template now returns a dict of {'s': [...], 'a': [...]}
+            critic_inputs = self._switch_chat_template(data)
+            # The VLMDoubleCritic handles tokenization internally, so we pass the lists of strings directly.
+            rm_data = DataProto.from_dict(critic_inputs)
         else:
             rm_input_ids = data.batch["input_ids"]
             rm_attention_mask = data.batch["attention_mask"]
@@ -1388,35 +1444,43 @@ class RewardModelWorker(Worker):
             rm_data = DataProto.from_dict(rm_inputs)
 
         # Support all hardwares
-        rm_data.batch = rm_data.batch.to(get_torch_device().current_device())
+        # commented out as to_device is handled in our critic implementation
+        # rm_data.batch = rm_data.batch.to(get_torch_device().current_device())
 
         # perform forward computation
         with self.ulysses_sharding_manager:
-            rm_data = self.ulysses_sharding_manager.preprocess_data(data=rm_data)
+            # we comment out ulysses sharding to avoid conflict to our critic
+            # rm_data = self.ulysses_sharding_manager.preprocess_data(data=rm_data)
             data = self.ulysses_sharding_manager.preprocess_data(data=data)
 
-            use_dynamic_bsz = self.config.use_dynamic_bsz
-            if use_dynamic_bsz:
-                max_token_len = self.config.forward_max_token_len_per_gpu * self.ulysses_sequence_parallel_size
-                micro_batches, indices = rearrange_micro_batches(batch=rm_data.batch, max_token_len=max_token_len)
-            else:
-                micro_batches = rm_data.batch.split(self.config.micro_batch_size_per_gpu)
-            output = []
-            for micro_batch in micro_batches:
-                rm_score = self._forward_micro_batch(micro_batch)
-                output.append(rm_score)
-            scores = torch.cat(output, dim=0)  # (batch_size)
+            # use_dynamic_bsz = self.config.use_dynamic_bsz
+            # if use_dynamic_bsz:
+            #     max_token_len = self.config.forward_max_token_len_per_gpu * self.ulysses_sequence_parallel_size
+            #     micro_batches, indices = rearrange_micro_batches(batch=rm_data.batch, max_token_len=max_token_len)
+            # else:
+            #     micro_batches = rm_data.batch.split(self.config.micro_batch_size_per_gpu)
+            # output = []
+            # for micro_batch in micro_batches:
+            #     rm_score = self._forward_micro_batch(micro_batch)
+            #     output.append(rm_score)
+            # scores = torch.cat(output, dim=0)  # (batch_size)
 
-            if use_dynamic_bsz:
-                indices = list(itertools.chain.from_iterable(indices))
-                assert len(indices) == scores.size(0), f"{len(indices)} vs. {scores.size()}"
-                revert_indices = torch.tensor(get_reverse_idx(indices), dtype=torch.long)
-                scores = scores[revert_indices]
+            # if use_dynamic_bsz:
+            #     indices = list(itertools.chain.from_iterable(indices))
+            #     assert len(indices) == scores.size(0), f"{len(indices)} vs. {scores.size()}"
+            #     revert_indices = torch.tensor(get_reverse_idx(indices), dtype=torch.long)
+            #     scores = scores[revert_indices]
 
-            token_level_scores = self._expand_to_token_level(data, scores)
-            # Note that this is only the scores, may not be the final rewards used to train RL
+            # token_level_scores = self._expand_to_token_level(data, scores)
+            # # Note that this is only the scores, may not be the final rewards used to train RL
+            # output = DataProto.from_dict(tensors={"rm_scores": token_level_scores})
+            # output = self.ulysses_sharding_manager.postprocess_data(data=output)
+
+            scores = self._forward_micro_batch(rm_data.batch)
+            token_level_scores = self._expand_to_token_level_for_responses(data, scores)
             output = DataProto.from_dict(tensors={"rm_scores": token_level_scores})
             output = self.ulysses_sharding_manager.postprocess_data(data=output)
+
 
         # https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes
         # unshard the root FSDP module
