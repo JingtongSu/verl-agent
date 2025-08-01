@@ -200,7 +200,11 @@ reward_model:
   enable: False
   strategy: fsdp
   model:
-    input_tokenizer: ${actor_rollout_ref.model.path}  # set this to null if the chat template is identical
+    use_our_critic: False # set to True if you want to use our Q-critic model as reward model
+    critic_lm_path: /checkpoint/ai_society/jtsu/hf_models/Qwen2.5-1.5B-Instruct
+    critic_checkpoint_path: /checkpoint/ai_society/jtsu/verl-agent/critic/extracted_critic_weights.pth # path to the extracted critic weights 
+    # input_tokenizer: ${actor_rollout_ref.model.path}  # set this to null if the chat template is identical
+    input_tokenizer: null
     path: ~/models/FsfairX-LLaMA3-RM-v0.1
     use_shm: False
     external_lib: ${actor_rollout_ref.model.external_lib}

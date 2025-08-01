@@ -88,6 +88,7 @@ class AdvantageEstimator(str, Enum):
 
     GAE = "gae"
     GRPO = "grpo"
+    GRPO_Q = "grpo_q"
     REINFORCE_PLUS_PLUS = "reinforce_plus_plus"
     REINFORCE_PLUS_PLUS_BASELINE = "reinforce_plus_plus_baseline"
     REMAX = "remax"
@@ -297,6 +298,22 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
+    # elif adv_estimator == AdvantageEstimator.GRPO_Q:
+    #     grpo_calculation_mask = data.batch["response_mask"]
+    #     if multi_turn:
+    #         # If multi-turn, replace the mask with the relevant part of loss_mask
+    #         response_length = grpo_calculation_mask.size(1)  # Get length from the initial response mask
+    #         grpo_calculation_mask = data.batch["loss_mask"][:, -response_length:]  # This mask is the one intended for GRPO
+    #     # Call compute_grpo_outcome_advantage with parameters matching its definition
+    #     advantages, returns = core_algos.compute_grpo_q_outcome_advantage(
+    #         token_level_rewards=data.batch["token_level_rewards"],
+    #         response_mask=grpo_calculation_mask,
+    #         index=data.non_tensor_batch["uid"],
+    #         traj_index=data.non_tensor_batch['traj_uid'],
+    #         norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+    #     )
+    #     data.batch["advantages"] = advantages
+    #     data.batch["returns"] = returns
     elif adv_estimator == AdvantageEstimator.GRPO_PASSK:
         advantages, returns = core_algos.compute_grpo_passk_outcome_advantage(
             token_level_rewards=data.batch["token_level_rewards"],
@@ -461,11 +478,16 @@ class RayPPOTrainer:
     def _validate_config(self):
         config = self.config
         # number of GPUs total
-        n_gpus = config.trainer.n_gpus_per_node * config.trainer.nnodes
+        # n_gpus = config.trainer.n_gpus_per_node * config.trainer.nnodes
+        
+        # # Get the number of GPUs for the actor/rollout role from the resource manager
+        actor_pool_name = self.resource_pool_manager.mapping[Role.ActorRollout]
+        actor_pool_spec = self.resource_pool_manager.resource_pool_spec[actor_pool_name]
+        n_gpus_actor = sum(actor_pool_spec)
 
         # 1. Check total batch size for data correctness
         real_train_batch_size = config.data.train_batch_size * config.actor_rollout_ref.rollout.n
-        assert real_train_batch_size % n_gpus == 0, f"real_train_batch_size ({real_train_batch_size}) must be divisible by total n_gpus ({n_gpus})."
+        assert real_train_batch_size % n_gpus_actor == 0, f"real_train_batch_size ({real_train_batch_size}) must be divisible by total n_gpus ({n_gpus_actor})."
 
         # A helper function to check "micro_batch_size" vs "micro_batch_size_per_gpu"
         # We throw an error if the user sets both. The new convention is "..._micro_batch_size_per_gpu".
@@ -529,7 +551,8 @@ class RayPPOTrainer:
             sp_size = config.actor_rollout_ref.actor.get("ulysses_sequence_parallel_size", 1)
             if config.actor_rollout_ref.actor.ppo_micro_batch_size is not None:
                 assert config.actor_rollout_ref.actor.ppo_mini_batch_size % config.actor_rollout_ref.actor.ppo_micro_batch_size == 0
-                assert config.actor_rollout_ref.actor.ppo_micro_batch_size * sp_size >= n_gpus
+                # assert config.actor_rollout_ref.actor.ppo_micro_batch_size * sp_size >= n_gpus
+                assert config.actor_rollout_ref.actor.ppo_micro_batch_size * sp_size >= n_gpus_actor
 
         assert config.actor_rollout_ref.actor.loss_agg_mode in [
             "token-mean",
@@ -701,8 +724,10 @@ class RayPPOTrainer:
             test_batch = test_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.val_kwargs.n, interleave=True)
 
             # we only do validation on rule-based rm
-            if self.config.reward_model.enable and test_batch[0].non_tensor_batch["reward_model"]["style"] == "model":
-                return {}
+            # print(test_batch[0].non_tensor_batch.keys())
+            # print(test_batch[0])
+            # if self.config.reward_model.enable and test_batch[0].non_tensor_batch["reward_model"]["style"] == "model":
+            #     return {}
 
             # Store original inputs
             input_ids = test_batch.batch["input_ids"]
@@ -1002,13 +1027,13 @@ class RayPPOTrainer:
 
         # perform validation before training
         # currently, we only support validation using the reward_function.
-        if self.val_reward_fn is not None and self.config.trainer.get("val_before_train", True):
-            val_metrics = self._validate()
-            assert val_metrics, f"{val_metrics=}"
-            pprint(f"Initial validation metrics: {val_metrics}")
-            logger.log(data=val_metrics, step=self.global_steps)
-            if self.config.trainer.get("val_only", False):
-                return
+        # if self.val_reward_fn is not None and self.config.trainer.get("val_before_train", True):
+        #     val_metrics = self._validate()
+        #     assert val_metrics, f"{val_metrics=}"
+        #     pprint(f"Initial validation metrics: {val_metrics}")
+        #     logger.log(data=val_metrics, step=self.global_steps)
+        #     if self.config.trainer.get("val_only", False):
+        #         return
 
         # add tqdm
         progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
@@ -1022,7 +1047,6 @@ class RayPPOTrainer:
                 metrics = {}
                 timing_raw = {}
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
-
                 # pop those keys for generation
                 batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
                 non_tensor_batch_keys_to_pop = ["raw_prompt_ids", "data_source"]
@@ -1101,7 +1125,10 @@ class RayPPOTrainer:
                     with _timer("reward", timing_raw):
                         # compute reward model score
                         if self.use_rm:
-                            reward_tensor = self.rm_wg.compute_rm_score(batch)
+                            print("### Using reward model to compute reward ###")
+                            with torch.no_grad():
+                                reward_tensor = self.rm_wg.compute_rm_score(batch)
+                            print(f"### Reward Tensor: {reward_tensor} ###")
                             batch = batch.union(reward_tensor)
 
                         if self.config.reward_model.launch_reward_fn_async:

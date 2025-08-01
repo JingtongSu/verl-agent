@@ -69,7 +69,7 @@ from peft import PeftModel
 from safetensors.torch import save_file
 from dataclasses import asdict
 import json
-# from critic_code.critic import VLMDoubleCritic
+from critic_code.critic import VLMDoubleCritic
 
 
 logger = logging.getLogger(__file__)
@@ -1163,6 +1163,7 @@ class RewardModelWorker(Worker):
             self.config.micro_batch_size_per_gpu = self.config.micro_batch_size
 
     def _build_model(self, config):
+        from transformers import AutoTokenizer
         # the following line is necessary
         from torch.distributed.fsdp import CPUOffload
         from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
@@ -1180,8 +1181,15 @@ class RewardModelWorker(Worker):
             self.input_tokenizer = hf_tokenizer(input_tokenizer_local_path, trust_remote_code=config.model.get("trust_remote_code", False))
             self.tokenizer = hf_tokenizer(local_path, trust_remote_code=config.model.get("trust_remote_code", False))
 
+        if self.config.model.use_our_critic:
+            self._do_switch_chat_template = True
+            critic_lm_path = copy_to_local(config.model.critic_lm_path, use_shm=use_shm)
+            self.input_tokenizer = AutoTokenizer.from_pretrained(critic_lm_path, trust_remote_code=config.model.get("trust_remote_code", False))
+            # critic_lm_path = '/checkpoint/ai_society/jtsu/hf_models/Qwen2.5-1.5B-Instruct'
+
         trust_remote_code = config.model.get("trust_remote_code", False)
-        model_config = AutoConfig.from_pretrained(local_path, trust_remote_code=trust_remote_code)
+        # model_config = AutoConfig.from_pretrained(local_path, trust_remote_code=trust_remote_code)
+        model_config = AutoConfig.from_pretrained(critic_lm_path, trust_remote_code=trust_remote_code)
         model_config.num_labels = 1
 
         # note that we have to create model in fp32. Otherwise, the optimizer is in bf16, which is incorrect
@@ -1200,17 +1208,29 @@ class RewardModelWorker(Worker):
             # Instantiate the VLMDoubleCritic model
             reward_module = VLMDoubleCritic(
                 device=get_torch_device().current_device(),
-                critic_lm=local_path,
+                critic_lm=critic_lm_path,
                 cache_dir=None,  # copy_to_local handles this
                 in_dim=0, # Not used in __init__
                 out_dim=0 # Not used in __init__
             )
 
-            apply_monkey_patch(
-                model=reward_module,
-                use_remove_padding=config.model.get("use_remove_padding", False),
-                ulysses_sp_size=self.ulysses_sequence_parallel_size,
-            )
+            if config.model.get("critic_checkpoint_path"):
+                critic_checkpoint_path = copy_to_local(config.model.critic_checkpoint_path, use_shm=use_shm)
+                if os.path.exists(critic_checkpoint_path):
+                    print(f"Loading critic weights from {critic_checkpoint_path}")
+                    # Ensure weights are loaded to the correct device (CPU first)
+                    state_dict = torch.load(critic_checkpoint_path, map_location="cpu")
+                    reward_module.load_state_dict(state_dict)
+                    print("Successfully loaded critic weights.")
+                else:
+                    warnings.warn(f"Critic checkpoint path provided but not found: {critic_checkpoint_path}")
+
+
+            # apply_monkey_patch(
+            #     model=reward_module,
+            #     use_remove_padding=config.model.get("use_remove_padding", False),
+            #     ulysses_sp_size=self.ulysses_sequence_parallel_size,
+            # )
 
             reward_module.to(torch.bfloat16)
 
@@ -1302,7 +1322,7 @@ class RewardModelWorker(Worker):
             # The micro_batch should contain 's' and 'a' for the critic
             q1, q2, _, _ = self.reward_module(micro_batch)
             # Using the first q-value as the score. You can also use torch.min(q1, q2)
-            rm_score = q1.squeeze(-1)
+            rm_score = torch.min(q1, q2).squeeze(-1)
             return rm_score
 
     def _expand_to_token_level(self, data: DataProto, scores: torch.Tensor):
@@ -1346,7 +1366,12 @@ class RewardModelWorker(Worker):
         src_max_length = data.batch["attention_mask"].shape[-1]
 
         src_tokenizer = self.input_tokenizer
-        target_tokenizer = self.tokenizer
+        # target_tokenizer = self.tokenizer
+
+        states = []
+        actions = []
+        ending = "\n\nNow it's your turn to take an action.\nYou should first reason step-by-step about the current situation. This reasoning process MUST be enclosed within <think> </think> tags. \nOnce you've finished your reasoning, you should choose an admissible action for current step and present it within <action> </action> tags.\n"
+
 
         rm_input_ids = []
         rm_attention_mask = []
@@ -1404,19 +1429,26 @@ class RewardModelWorker(Worker):
         # return DataProto.from_dict(rm_inputs)
 
             # The state is the conversation history
-            state_prompt = target_tokenizer.apply_chat_template(chat, add_generation_prompt=False, tokenize=False)
+            # state_prompt = src_tokenizer.apply_chat_template(chat, add_generation_prompt=False, tokenize=False)
+            state_prompt = "".join([turn["content"] for turn in chat])
+            if state_prompt.endswith(ending):
+                state_prompt = state_prompt[:-len(ending)]
             states.append(state_prompt)
 
-            # The action is the generated response
-            actions.append(response)
+            # The action is the text between <action> and </action> parts
+            try:
+                action = response.split("<action>")[1].split("</action>")[0].strip()
+            except IndexError:
+                action = response
+            actions.append(action)
 
-            if self.rank == 0 and i == 0:
-                # for debugging purpose
-                print(f"State: {state_prompt}")
-                print(f"Action: {response}")
+            # if self.rank == 0 and i == 0:
+            #     # for debugging purpose
+            #     print(f"State: {state_prompt}")
+            #     print(f"Action: {action}")
 
         # Return a dictionary that can be passed to the critic's forward method
-        return {"s": states, "a": actions}
+        return {"s": states, "a": actions, "s_prime": states, "r": None}
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_rm_score(self, data: DataProto):
@@ -1431,7 +1463,8 @@ class RewardModelWorker(Worker):
             # _switch_chat_template now returns a dict of {'s': [...], 'a': [...]}
             critic_inputs = self._switch_chat_template(data)
             # The VLMDoubleCritic handles tokenization internally, so we pass the lists of strings directly.
-            rm_data = DataProto.from_dict(critic_inputs)
+            # rm_data = DataProto.from_dict(critic_inputs)
+            rm_data = critic_inputs
         else:
             rm_input_ids = data.batch["input_ids"]
             rm_attention_mask = data.batch["attention_mask"]
@@ -1446,6 +1479,8 @@ class RewardModelWorker(Worker):
         # Support all hardwares
         # commented out as to_device is handled in our critic implementation
         # rm_data.batch = rm_data.batch.to(get_torch_device().current_device())
+
+        print("### RM data batch size: ###", len(rm_data["s"]))
 
         # perform forward computation
         with self.ulysses_sharding_manager:
@@ -1476,9 +1511,32 @@ class RewardModelWorker(Worker):
             # output = DataProto.from_dict(tensors={"rm_scores": token_level_scores})
             # output = self.ulysses_sharding_manager.postprocess_data(data=output)
 
-            scores = self._forward_micro_batch(rm_data.batch)
+            # feeding the complete rm_data to the reward module could lead to OOM
+            # so we split it into micro batches
+            enforced_batch_size = 256
+            scores = []
+            for k in range(len(rm_data["s"]) // enforced_batch_size + 1):
+                s_batch = rm_data["s"][k * enforced_batch_size:(k + 1) * enforced_batch_size]
+                if not s_batch:
+                    continue
+                a_batch = rm_data["a"][k * enforced_batch_size:(k + 1) * enforced_batch_size]
+                
+                batch_scores = self._forward_micro_batch({"s": s_batch,
+                                                   "a": a_batch,
+                                                   "s_prime": s_batch,
+                                                   "r": None})
+                scores.append(batch_scores)
+            if not scores:
+                # Handle case where there are no scores, maybe return empty tensor
+                # or raise an error depending on desired behavior.
+                # For now, creating an empty tensor on the correct device.
+                scores = torch.empty(0, device=data.batch.device)
+            else:
+                scores = torch.cat(scores, dim=0)
+
+            print("Scores shape returned from Q-module:", scores.shape)
             token_level_scores = self._expand_to_token_level_for_responses(data, scores)
-            output = DataProto.from_dict(tensors={"rm_scores": token_level_scores})
+            output = DataProto.from_dict(tensors={"q_scores": token_level_scores})
             output = self.ulysses_sharding_manager.postprocess_data(data=output)
 
 
