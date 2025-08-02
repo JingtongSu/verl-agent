@@ -112,7 +112,7 @@ def compute_gae_advantage_return(
 # Our Q-assisted GRPO advantage
 def compute_q_assisted_grpo_outcome_advantage(
     token_level_rewards: torch.Tensor,
-    q_values: torch.Tensor,
+    q_scores: torch.Tensor,
     response_mask: torch.Tensor,
     index: np.ndarray,
     traj_index: np.ndarray,
@@ -175,7 +175,7 @@ def compute_q_assisted_grpo_outcome_advantage(
         scores = scores.unsqueeze(-1) * response_mask
 
     # add Q-values to the scores
-    scores += q_values
+    scores += (q_scores) / 10.0  # scale Q-values to be in the same range as the scores
     return scores, scores
 
 

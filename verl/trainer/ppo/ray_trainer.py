@@ -298,22 +298,23 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
-    # elif adv_estimator == AdvantageEstimator.GRPO_Q:
-    #     grpo_calculation_mask = data.batch["response_mask"]
-    #     if multi_turn:
-    #         # If multi-turn, replace the mask with the relevant part of loss_mask
-    #         response_length = grpo_calculation_mask.size(1)  # Get length from the initial response mask
-    #         grpo_calculation_mask = data.batch["loss_mask"][:, -response_length:]  # This mask is the one intended for GRPO
-    #     # Call compute_grpo_outcome_advantage with parameters matching its definition
-    #     advantages, returns = core_algos.compute_grpo_q_outcome_advantage(
-    #         token_level_rewards=data.batch["token_level_rewards"],
-    #         response_mask=grpo_calculation_mask,
-    #         index=data.non_tensor_batch["uid"],
-    #         traj_index=data.non_tensor_batch['traj_uid'],
-    #         norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
-    #     )
-    #     data.batch["advantages"] = advantages
-    #     data.batch["returns"] = returns
+    elif adv_estimator == AdvantageEstimator.GRPO_Q:
+        grpo_calculation_mask = data.batch["response_mask"]
+        if multi_turn:
+            # If multi-turn, replace the mask with the relevant part of loss_mask
+            response_length = grpo_calculation_mask.size(1)  # Get length from the initial response mask
+            grpo_calculation_mask = data.batch["loss_mask"][:, -response_length:]  # This mask is the one intended for GRPO
+        # Call compute_grpo_outcome_advantage with parameters matching its definition
+        advantages, returns = core_algos.compute_q_assisted_grpo_outcome_advantage(
+            token_level_rewards=data.batch["token_level_rewards"],
+            q_scores=data.batch["q_scores"],
+            response_mask=grpo_calculation_mask,
+            index=data.non_tensor_batch["uid"],
+            traj_index=data.non_tensor_batch['traj_uid'],
+            norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+        )
+        data.batch["advantages"] = advantages
+        data.batch["returns"] = returns
     elif adv_estimator == AdvantageEstimator.GRPO_PASSK:
         advantages, returns = core_algos.compute_grpo_passk_outcome_advantage(
             token_level_rewards=data.batch["token_level_rewards"],
@@ -461,6 +462,7 @@ class RayPPOTrainer:
             self.use_critic = True
         elif self.config.algorithm.adv_estimator in [
             AdvantageEstimator.GRPO,
+            AdvantageEstimator.GRPO_Q,
             AdvantageEstimator.GRPO_PASSK,
             AdvantageEstimator.REINFORCE_PLUS_PLUS,
             AdvantageEstimator.REMAX,
@@ -1125,10 +1127,10 @@ class RayPPOTrainer:
                     with _timer("reward", timing_raw):
                         # compute reward model score
                         if self.use_rm:
-                            print("### Using reward model to compute reward ###")
+                            # print("### Using reward model to compute reward ###")
                             with torch.no_grad():
                                 reward_tensor = self.rm_wg.compute_rm_score(batch)
-                            print(f"### Reward Tensor: {reward_tensor} ###")
+                            # print(f"### Reward Tensor: {reward_tensor} ###")
                             batch = batch.union(reward_tensor)
 
                         if self.config.reward_model.launch_reward_fn_async:
